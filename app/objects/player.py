@@ -227,6 +227,7 @@ class Player:
         is_bot_client: bool = False,
         is_tourney_client: bool = False,
         api_key: str | None = None,
+        votes: int = 0,
         irc_key: str | None = None,
         irc_client: bool | False = False,
         **kwargs
@@ -256,6 +257,7 @@ class Player:
         self.is_bot_client = is_bot_client
         self.is_tourney_client = is_tourney_client
         self.api_key = api_key
+        self.votes = votes
         self.irc_key = irc_key
         self.irc_client = irc_client
         # avoid enqueuing packets to bot accounts.

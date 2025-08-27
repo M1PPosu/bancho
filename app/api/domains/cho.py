@@ -870,6 +870,7 @@ async def handle_osu_login_request(
         login_time=login_time,
         is_tourney_client=osu_version.stream == "tourney",
         api_key=user_info["api_key"],
+        votes=user_info["votes"],
     )
 
     data = bytearray(app.packets.protocol_version(19))

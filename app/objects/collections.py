@@ -231,6 +231,7 @@ class Players(list[Player]):
             silence_end=player["silence_end"],
             donor_end=player["donor_end"],
             api_key=player["api_key"],
+            votes=player["votes"],
         )
 
     async def from_cache_or_sql(
