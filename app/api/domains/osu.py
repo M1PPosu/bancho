@@ -81,43 +81,49 @@ from app.usecases import achievements as achievements_usecases
 from app.usecases import user_achievements as user_achievements_usecases
 from app.utils import escape_enum
 from app.utils import pymysql_encode
+from app.api.domains.score_risk_engine import (
+    build_player_context,
+    build_score_context,
+    evaluate_score_risk,
+    RiskAction,
+)
 
 BEATMAPS_PATH = SystemPath.cwd() / ".data/osu"
 REPLAYS_PATH = SystemPath.cwd() / ".data/osr"
 SCREENSHOTS_PATH = SystemPath.cwd() / ".data/ss"
 
-file_path = ".config/caps.json"
+# file_path = ".config/caps.json"
 
-if not os.path.exists(".config"):
-    os.makedirs(".config")
+# if not os.path.exists(".config"):
+    # os.makedirs(".config")
 
 # Default data
-default_data = {
-    "enabled": False,
-    "caps": {
-        "0": 800,  # vn!std
-        "4": 1400, # rx!std
-        "8": 600   # ap!std
-    }
-}
+# default_data = {
+    #"enabled": False,
+    #"caps": {
+        #"0": 800,  # vn!std
+        #"4": 1400, # rx!std
+        #"8": 600   # ap!std
+    #}
+#}
 
 # Ensure the file exists and is not empty
-if not os.path.exists(file_path) or os.stat(file_path).st_size == 0:
-    with open(file_path, "wb") as f:
-        f.write(orjson.dumps(default_data))
+#if not os.path.exists(file_path) or os.stat(file_path).st_size == 0:
+    #with open(file_path, "wb") as f:
+        #f.write(orjson.dumps(default_data))
 
 # Load function with error handling
-def load_json(file_path: str):
-    try:
-        with open(file_path, "rb") as f:
-            return orjson.loads(f.read())
-    except orjson.JSONDecodeError:
+#def load_json(file_path: str):
+    #try:
+        #with open(file_path, "rb") as f:
+            #return orjson.loads(f.read())
+    #except orjson.JSONDecodeError:
         # Reset file if JSON is invalid
-        with open(file_path, "wb") as f:
-            f.write(orjson.dumps(default_data))
-        return default_data
+        #with open(file_path, "wb") as f:
+            #f.write(orjson.dumps(default_data))
+        #return default_data
 
-capData = load_json(file_path)
+#capData = load_json(file_path)
 
 
 router = APIRouter(
@@ -621,6 +627,12 @@ if(not app.settings.DISALLOW_OLD_CLIENTS):
             # Player is not online, return nothing so that their
             # client will retry submission when they log in.
             return Response(b"")
+        
+
+        # block restricted players from submitting
+        if player.restricted:
+            log(f"{player} attempted to submit a score while restricted.", Ansi.LRED)
+            return Response(b"error: no")
 
         # parse the score from the remaining data
         score = Score.from_submission(score_data[2:])
@@ -629,6 +641,10 @@ if(not app.settings.DISALLOW_OLD_CLIENTS):
         score.bmap = bmap
         score.player = player
 
+        # restricts smhhhhhhhh fuck bancho.py-ex
+        if score.player.restricted:
+            log(f"{score.player} attempted to submit a score while restricted.", Ansi.LRED)
+            return Response(b"error: no")
         ## perform checksum validation
 
         unique_id1, unique_id2 = unique_ids.split("|", maxsplit=1)
@@ -728,22 +744,65 @@ if(not app.settings.DISALLOW_OLD_CLIENTS):
         
             score_eligible = score.bmap.awards_ranked_pp and score.passed
             player_eligible = not score.player.priv & Privileges.WHITELISTED and not score.player.restricted
-            if score_eligible and player_eligible and capData["enabled"]:
-                log(f"caps: {capData['caps']}")
-                caps = capData["caps"]
 
-                # check if pp cap was exceeded
-                if str(score.mode) in caps and score.pp >= caps[str(score.mode)]:
+            if score_eligible and player_eligible:
+                player_ctx = await build_player_context(
+                    score.player, score.mode, app.state.services.database
+                )
+                score_ctx = build_score_context(score, score.bmap)
+                risk = evaluate_score_risk(score_ctx, player_ctx)
+
+                log(
+                    f"[risk] {score.player} | {score.pp:.0f}pp | "
+                    f"score={risk.final_score:.1f} action={risk.action.name} | "
+                    f"reasons={risk.reasons}",
+                    Ansi.LCYAN,
+                )
+
+                if risk.action == RiskAction.AUTO_RESTRICT:
                     await score.player.restrict(
                         admin=app.state.sessions.bot,
-                        reason=f"[{score.mode!r} autoban] liveplay requested",
+                        reason=f"[autoban] risk={risk.final_score:.1f}: {'; '.join(risk.reasons)}",
                     )
-
-                    # refresh their client state
                     if score.player.is_online:
                         score.player.logout()
+                    return Response(b"error: ban")
 
-            """ Score submission checks completed; submit the score. """
+                elif risk.action == RiskAction.TEMP_RESTRICT:
+                    await score.player.restrict(
+                        admin=app.state.sessions.bot,
+                        reason=f"[risk-review] risk={risk.final_score:.1f}: {'; '.join(risk.reasons)}",
+                    )
+                    if score.player.is_online:
+                        score.player.logout()
+                    return Response(b"error: ban")
+
+                elif risk.action == RiskAction.FREEZE_REVIEW:
+                    await app.state.services.database.execute(
+                        "INSERT INTO anticheat_flags "
+                        "(userid, score_id, risk_score, reasons, created_at) "
+                        "VALUES (:uid, :sid, :risk, :reasons, NOW())",
+                        {
+                            "uid": score.player.id,
+                            "sid": 0,  # score not inserted yet; updated below
+                            "risk": risk.final_score,
+                            "reasons": "; ".join(risk.reasons),
+                        },
+                    )
+
+                elif risk.action == RiskAction.ACCEPT_LOG:
+                    log(f"[risk-monitor] {score.player}: {'; '.join(risk.reasons)}", Ansi.LYELLOW)
+                    await app.state.services.database.execute(
+                        "INSERT INTO anticheat_flags "
+                        "(userid, score_id, risk_score, reasons, created_at) "
+                        "VALUES (:uid, :sid, :risk, :reasons, NOW())",
+                        {
+                            "uid": score.player.id,
+                            "sid": 0,
+                            "risk": risk.final_score,
+                            "reasons": "; ".join(risk.reasons),
+                        },
+                    )
 
             if app.state.services.datadog:
                 app.state.services.datadog.increment("bancho.submitted_scores")
@@ -1225,6 +1284,19 @@ async def osuSubmitModularSelector(
         # Player is not online, return nothing so that their
         # client will retry submission when they log in.
         return Response(b"")
+    
+    if player.restricted:
+        existing_best = await app.state.services.database.fetch_one(
+            "SELECT 1 FROM scores WHERE status = 2 AND userid = :user_id",
+            {"user_id": player.id},
+        )
+        if existing_best:
+            await app.state.services.database.execute(
+                "UPDATE scores SET status = 1 "
+                "WHERE status = 2 AND userid = :user_id",
+                {"user_id": player.id},
+            )
+        return Response(b"error: no.")
 
     # parse the score from the remaining data
     score = Score.from_submission(score_data[2:])
@@ -1337,21 +1409,65 @@ async def osuSubmitModularSelector(
         score.time_elapsed = score_time if score.passed else fail_time
         score_eligible = score.bmap.awards_ranked_pp and score.passed
         player_eligible = not score.player.priv & Privileges.WHITELISTED and not score.player.restricted
-        if score_eligible and player_eligible and capData["enabled"]:
-            log(f"caps: {capData['caps']}")
-            caps = capData["caps"]
 
-            # check if pp cap was exceeded
-            if str(score.mode) in caps and score.pp >= caps[str(score.mode)]:
+        if score_eligible and player_eligible:
+            player_ctx = await build_player_context(
+                score.player, score.mode, app.state.services.database
+            )
+            score_ctx = build_score_context(score, score.bmap)
+            risk = evaluate_score_risk(score_ctx, player_ctx)
+
+            log(
+                f"[risk] {score.player} | {score.pp:.0f}pp | "
+                f"score={risk.final_score:.1f} action={risk.action.name} | "
+                f"reasons={risk.reasons}",
+                Ansi.LCYAN,
+            )
+
+            if risk.action == RiskAction.AUTO_RESTRICT:
                 await score.player.restrict(
                     admin=app.state.sessions.bot,
-                    reason=f"[{score.mode!r} autoban] liveplay requested",
+                    reason=f"[autoban] risk={risk.final_score:.1f}: {'; '.join(risk.reasons)}",
                 )
-
-                # refresh their client state
                 if score.player.is_online:
                     score.player.logout()
+                return Response(b"error: ban")
 
+            elif risk.action == RiskAction.TEMP_RESTRICT:
+                await score.player.restrict(
+                    admin=app.state.sessions.bot,
+                    reason=f"[risk-review] risk={risk.final_score:.1f}: {'; '.join(risk.reasons)}",
+                )
+                if score.player.is_online:
+                    score.player.logout()
+                return Response(b"error: ban")
+
+            elif risk.action == RiskAction.FREEZE_REVIEW:
+                await app.state.services.database.execute(
+                    "INSERT INTO anticheat_flags "
+                    "(userid, score_id, risk_score, reasons, created_at) "
+                    "VALUES (:uid, :sid, :risk, :reasons, NOW())",
+                    {
+                        "uid": score.player.id,
+                        "sid": 0,  # score not inserted yet; updated below
+                        "risk": risk.final_score,
+                        "reasons": "; ".join(risk.reasons),
+                    },
+                )
+
+            elif risk.action == RiskAction.ACCEPT_LOG:
+                log(f"[risk-monitor] {score.player}: {'; '.join(risk.reasons)}", Ansi.LYELLOW)
+                await app.state.services.database.execute(
+                    "INSERT INTO anticheat_flags "
+                    "(userid, score_id, risk_score, reasons, created_at) "
+                    "VALUES (:uid, :sid, :risk, :reasons, NOW())",
+                    {
+                        "uid": score.player.id,
+                        "sid": 0,
+                        "risk": risk.final_score,
+                        "reasons": "; ".join(risk.reasons),
+                    },
+                )
         """ Score submission checks completed; submit the score. """
 
         if app.state.services.datadog:
