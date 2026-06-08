@@ -66,7 +66,15 @@ def unwrap_osu_direct_api_response(response: httpx.Response) -> BeatmapApiRespon
     if not response.is_success:
         return {"data": None, "status_code": response.status_code}
 
-    response_data = response.json()
+    try:
+        response_data = response.json()
+    except ValueError as exc:
+        body_preview = response.text[:200].replace("\n", "\\n")
+        log(
+            f"Failed to decode beatmap API response as JSON "
+            f"(status={response.status_code}, body={body_preview!r}): {exc!r}",
+        )
+        return {"data": None, "status_code": response.status_code}
 
     match response_data:
         case list(l):
@@ -88,7 +96,16 @@ def unwrap_osu_direct_api_response(response: httpx.Response) -> BeatmapApiRespon
 
 
 def unwrap_bancho_api_response(response: httpx.Response) -> BeatmapApiResponse:
-    response_data = response.json()
+    try:
+        response_data = response.json()
+    except ValueError as exc:
+        body_preview = response.text[:200].replace("\n", "\\n")
+        log(
+            f"Failed to decode bancho API response as JSON "
+            f"(status={response.status_code}, body={body_preview!r}): {exc!r}",
+        )
+        return {"data": None, "status_code": response.status_code}
+
     if response.status_code == 200 and response_data:  # (data may be [])
         return {"data": response_data, "status_code": response.status_code}
 
