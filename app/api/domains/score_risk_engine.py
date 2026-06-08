@@ -518,7 +518,7 @@ def evaluate_score_risk(
         embed.add_field(name="Account Age", value=f"{player.account_age_days}d", inline=True)
         embed.add_field(
             name="Components",
-            value="\n".join(f"{k}: {v:.1f}" for k, v in components.items()),
+            value="\n".join(f"{k}: {v:.1f}" for k, v in raw.items()),
             inline=False,
         )
 
@@ -607,7 +607,7 @@ async def build_player_context(
     # Prior restriction history
     restrict_row = await database.fetch_one(
         "SELECT COUNT(*) AS cnt FROM logs "
-        "WHERE target_id = :uid AND `action` = 'restrict'",
+        "WHERE `to` = :uid AND `action` = 'restrict'",
         {"uid": player.id},
     )
     has_prev_restriction = bool(restrict_row and restrict_row["cnt"] > 0)

@@ -724,21 +724,28 @@ if(not app.settings.DISALLOW_OLD_CLIENTS):
             # all data read from submission.
             # now we can calculate things based on our data.
             score.acc = score.calculate_accuracy()
-
+        
+        # this should fix the bs
             osu_file_available = await ensure_osu_file_is_available(
                 bmap.id,
                 expected_md5=bmap.md5,
             )
-            if osu_file_available:
-                score.pp, score.sr = score.calculate_performance(bmap.id)
+            if not osu_file_available:
+                log(
+                    f"{score.player} submitted a score for beatmap {bmap.id}, but the .osu file is unavailable.",
+                    Ansi.LRED,
+                )
+                return Response(b"error: no")
 
-                if score.passed:
-                    await score.calculate_status()
+            score.pp, score.sr = score.calculate_performance(bmap.id)
 
-                    if score.bmap.status != RankedStatus.Pending:
-                        score.rank = await score.calculate_placement()
-                else:
-                    score.status = SubmissionStatus.FAILED
+            if score.passed:
+                await score.calculate_status()
+
+                if score.bmap.status != RankedStatus.Pending:
+                    score.rank = await score.calculate_placement()
+            else:
+                score.status = SubmissionStatus.FAILED
 
             score.time_elapsed = score_time if score.passed else fail_time
         
@@ -1395,16 +1402,22 @@ async def osuSubmitModularSelector(
             bmap.id,
             expected_md5=bmap.md5,
         )
-        if osu_file_available:
-            score.pp, score.sr = score.calculate_performance(bmap.id)
+        if not osu_file_available:
+            log(
+                f"{score.player} submitted a score for beatmap {bmap.id}, but the .osu file is unavailable.",
+                Ansi.LRED,
+            )
+            return Response(b"error: no")
 
-            if score.passed:
-                await score.calculate_status()
+        score.pp, score.sr = score.calculate_performance(bmap.id)
 
-                if score.bmap.status != RankedStatus.Pending:
-                    score.rank = await score.calculate_placement()
-            else:
-                score.status = SubmissionStatus.FAILED
+        if score.passed:
+            await score.calculate_status()
+
+            if score.bmap.status != RankedStatus.Pending:
+                score.rank = await score.calculate_placement()
+        else:
+            score.status = SubmissionStatus.FAILED
 
         score.time_elapsed = score_time if score.passed else fail_time
         score_eligible = score.bmap.awards_ranked_pp and score.passed
