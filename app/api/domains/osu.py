@@ -601,12 +601,20 @@ if(not app.settings.DISALLOW_OLD_CLIENTS):
         score_data_b64, replay_file = score_parameters
 
         # decrypt the score data (aes)
-        score_data, client_hash_decoded = encryption.decrypt_score_aes_data(
-            score_data_b64,
-            client_hash_b64,
-            iv_b64,
-            osu_version,
-        )
+        try:
+            score_data, client_hash_decoded = encryption.decrypt_score_aes_data(
+                score_data_b64,
+                client_hash_b64,
+                iv_b64,
+                osu_version,
+            )
+        except Exception as exc:
+            log(f"Failed to decrypt score submission: {exc!r}", Ansi.LRED)
+            return Response(b"")
+
+        if len(score_data) < 3:
+            log(f"Rejected malformed score submission with {len(score_data)} fields.", Ansi.LRED)
+            return Response(b"")
 
         # fetch map & player
 
@@ -619,6 +627,10 @@ if(not app.settings.DISALLOW_OLD_CLIENTS):
         # if the client has supporter, a space is appended
         # but usernames may also end with a space, which must be preserved
         username = score_data[1]
+        if not username:
+            log("Rejected score submission with empty username.", Ansi.LRED)
+            return Response(b"")
+
         if username[-1] == " ":
             username = username[:-1]
 
@@ -635,7 +647,11 @@ if(not app.settings.DISALLOW_OLD_CLIENTS):
             return Response(b"error: no")
 
         # parse the score from the remaining data
-        score = Score.from_submission(score_data[2:])
+        try:
+            score = Score.from_submission(score_data[2:])
+        except (IndexError, TypeError, ValueError) as exc:
+            log(f"{player} submitted malformed score data: {exc!r}", Ansi.LRED)
+            return Response(b"")
 
         # attach bmap & player
         score.bmap = bmap
@@ -647,7 +663,12 @@ if(not app.settings.DISALLOW_OLD_CLIENTS):
             return Response(b"error: no")
         ## perform checksum validation
 
-        unique_id1, unique_id2 = unique_ids.split("|", maxsplit=1)
+        try:
+            unique_id1, unique_id2 = unique_ids.split("|", maxsplit=1)
+        except ValueError:
+            log(f"{player} submitted malformed unique ids.", Ansi.LRED)
+            return Response(b"")
+
         unique_id1_md5 = hashlib.md5(unique_id1.encode()).hexdigest()
         unique_id2_md5 = hashlib.md5(unique_id2.encode()).hexdigest()
 
@@ -1265,12 +1286,20 @@ async def osuSubmitModularSelector(
     score_data_b64, replay_file = score_parameters
 
     # decrypt the score data (aes)
-    score_data, client_hash_decoded = encryption.decrypt_score_aes_data(
-        score_data_b64,
-        client_hash_b64,
-        iv_b64,
-        osu_version,
-    )
+    try:
+        score_data, client_hash_decoded = encryption.decrypt_score_aes_data(
+            score_data_b64,
+            client_hash_b64,
+            iv_b64,
+            osu_version,
+        )
+    except Exception as exc:
+        log(f"Failed to decrypt score submission: {exc!r}", Ansi.LRED)
+        return Response(b"")
+
+    if len(score_data) < 3:
+        log(f"Rejected malformed score submission with {len(score_data)} fields.", Ansi.LRED)
+        return Response(b"")
 
     # fetch map & player
 
@@ -1283,6 +1312,10 @@ async def osuSubmitModularSelector(
     # if the client has supporter, a space is appended
     # but usernames may also end with a space, which must be preserved
     username = score_data[1]
+    if not username:
+        log("Rejected score submission with empty username.", Ansi.LRED)
+        return Response(b"")
+
     if username[-1] == " ":
         username = username[:-1]
 
@@ -1306,7 +1339,11 @@ async def osuSubmitModularSelector(
         return Response(b"error: no.")
 
     # parse the score from the remaining data
-    score = Score.from_submission(score_data[2:])
+    try:
+        score = Score.from_submission(score_data[2:])
+    except (IndexError, TypeError, ValueError) as exc:
+        log(f"{player} submitted malformed score data: {exc!r}", Ansi.LRED)
+        return Response(b"")
 
     # attach bmap & player
     score.bmap = bmap
@@ -1314,7 +1351,12 @@ async def osuSubmitModularSelector(
 
     ## perform checksum validation
 
-    unique_id1, unique_id2 = unique_ids.split("|", maxsplit=1)
+    try:
+        unique_id1, unique_id2 = unique_ids.split("|", maxsplit=1)
+    except ValueError:
+        log(f"{player} submitted malformed unique ids.", Ansi.LRED)
+        return Response(b"")
+
     unique_id1_md5 = hashlib.md5(unique_id1.encode()).hexdigest()
     unique_id2_md5 = hashlib.md5(unique_id2.encode()).hexdigest()
 
@@ -1585,56 +1627,61 @@ async def osuSubmitModularSelector(
                             app.metrics.increment("ex_first_place_webhook")
 
 
-            # this score is our best score.
-            # update any preexisting personal best
-            # records with SubmissionStatus.SUBMITTED.
-            await app.state.services.database.execute(
-                "UPDATE scores SET status = 1 "
-                "WHERE status = 2 AND map_md5 = :map_md5 "
-                "AND userid = :user_id AND mode = :mode",
+        async with app.state.services.database.transaction():
+            if score.status == SubmissionStatus.BEST:
+                # this score is our best score.
+                # update any preexisting personal best
+                # records with SubmissionStatus.SUBMITTED.
+                await app.state.services.database.execute(
+                    "UPDATE scores SET status = 1 "
+                    "WHERE status = 2 AND map_md5 = :map_md5 "
+                    "AND userid = :user_id AND mode = :mode",
+                    {
+                        "map_md5": score.bmap.md5,
+                        "user_id": score.player.id,
+                        "mode": score.mode,
+                    },
+                )
+
+            score.id = await app.state.services.database.execute(
+                "INSERT INTO scores "
+                "VALUES (NULL, "
+                ":map_md5, :score, :pp, :acc, "
+                ":max_combo, :mods, :n300, :n100, "
+                ":n50, :nmiss, :ngeki, :nkatu, "
+                ":grade, :status, :mode, :play_time, "
+                ":time_elapsed, :client_flags, :user_id, :perfect, "
+                ":checksum)",
                 {
                     "map_md5": score.bmap.md5,
-                    "user_id": score.player.id,
+                    "score": score.score,
+                    "pp": score.pp,
+                    "acc": score.acc,
+                    "max_combo": score.max_combo,
+                    "mods": score.mods,
+                    "n300": score.n300,
+                    "n100": score.n100,
+                    "n50": score.n50,
+                    "nmiss": score.nmiss,
+                    "ngeki": score.ngeki,
+                    "nkatu": score.nkatu,
+                    "grade": score.grade.name,
+                    "status": score.status,
                     "mode": score.mode,
+                    "play_time": score.server_time,
+                    "time_elapsed": score.time_elapsed,
+                    "client_flags": score.client_flags,
+                    "user_id": score.player.id,
+                    "perfect": score.perfect,
+                    "checksum": score.client_checksum,
                 },
             )
 
-        score.id = await app.state.services.database.execute(
-            "INSERT INTO scores "
-            "VALUES (NULL, "
-            ":map_md5, :score, :pp, :acc, "
-            ":max_combo, :mods, :n300, :n100, "
-            ":n50, :nmiss, :ngeki, :nkatu, "
-            ":grade, :status, :mode, :play_time, "
-            ":time_elapsed, :client_flags, :user_id, :perfect, "
-            ":checksum)",
-            {
-                "map_md5": score.bmap.md5,
-                "score": score.score,
-                "pp": score.pp,
-                "acc": score.acc,
-                "max_combo": score.max_combo,
-                "mods": score.mods,
-                "n300": score.n300,
-                "n100": score.n100,
-                "n50": score.n50,
-                "nmiss": score.nmiss,
-                "ngeki": score.ngeki,
-                "nkatu": score.nkatu,
-                "grade": score.grade.name,
-                "status": score.status,
-                "mode": score.mode,
-                "play_time": score.server_time,
-                "time_elapsed": score.time_elapsed,
-                "client_flags": score.client_flags,
-                "user_id": score.player.id,
-                "perfect": score.perfect,
-                "checksum": score.client_checksum,
-            },
-        )
-
-        pubsub = app.state.services.redis.pubsub()
-        await pubsub.execute_command("PUBLISH", "ex:submit", score.toJSON())
+        try:
+            pubsub = app.state.services.redis.pubsub()
+            await pubsub.execute_command("PUBLISH", "ex:submit", score.toJSON())
+        except Exception as exc:
+            log(f"Failed to publish score submission event for score {score.id}: {exc!r}", Ansi.LYELLOW)
         
     if score.passed:
         replay_data = await replay_file.read()
